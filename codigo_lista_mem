@@ -1,0 +1,237 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <string.h>
+#include <ctype.h>
+#include <unistd.h>     // sleep
+#include <signal.h>     // signal handling
+
+#define PROC_DIR "/proc"
+#define MAX_PATH 256
+#define MAX_LINE 512
+#define MAX_PROC 4096
+#define BAR_WIDTH 30
+
+// Char onde armazena as informações dos processos
+typedef struct {
+    int pid;
+    char name[256];
+    long memory_kb;
+} ProcessInfo;
+
+// Verifica se uma string tem mais de um digito
+int is_number(const char *str) {
+    while (*str) {
+        if (!isdigit(*str++)) return 0;
+    }
+    return 1;
+}
+
+// Nessa função tem uma comparação dos processos onde são comparados para gerar a ordem de consumo
+int compare_memory(const void *a, const void *b) {
+    ProcessInfo *p1 = (ProcessInfo *)a;
+    ProcessInfo *p2 = (ProcessInfo *)b;
+    return p2->memory_kb - p1->memory_kb;
+}
+
+// Função que le todo o /proc/meminfo (Arquivo onde são salvos os dados de memória e demais) por aqui consigo pegar o quanto de memória foi consumida
+long get_total_memory_kb() {
+    FILE *meminfo = fopen("/proc/meminfo", "r"); //Aqui abre o arquivo meminfo com permissão de leitura
+    char line[MAX_LINE]; // Varia pré definida 
+    long total_kb = 0;
+
+    if (!meminfo) return 0; // se não achar o arquivo meminfo ele fecha a função
+
+    while (fgets(line, sizeof(line), meminfo)) {
+        if (strncmp(line, "MemTotal:", 9) == 0) {
+            sscanf(line, "MemTotal: %ld", &total_kb);
+            break;
+        }
+    }
+
+    fclose(meminfo); //fecha o arquivo AQUI 
+    return total_kb;
+}
+
+// Lê a memória disponível (livre + buffers/cache)
+long get_available_memory_kb() {
+    FILE *meminfo = fopen("/proc/meminfo", "r");
+    char line[MAX_LINE];
+    long available_kb = 0;
+
+    if (!meminfo) return 0;
+
+    while (fgets(line, sizeof(line), meminfo)) {
+        if (strncmp(line, "MemAvailable:", 13) == 0) {
+            sscanf(line, "MemAvailable: %ld", &available_kb);
+            break;
+        }
+    }
+
+    fclose(meminfo);
+    return available_kb;
+}
+
+// Utiliza de um comando da existente do linux (dmidecode) que mostra algumas informações da DMI (Destktop Management Information)
+char* get_memory_speed() {
+    FILE *fp = popen("sudo dmidecode -t memory | grep -m1 'Speed:'", "r");
+    static char result[64];
+
+    if (fp == NULL) {
+        snprintf(result, sizeof(result), "Velocidade desconhecida");
+        return result;
+    }
+
+    if (fgets(result, sizeof(result), fp) == NULL) {
+        snprintf(result, sizeof(result), "Velocidade indisponível");
+    }
+
+    pclose(fp);
+    // Remove newline
+    result[strcspn(result, "\n")] = 0;
+    return result;
+}
+
+// Desenha barra com consumo de memória
+void draw_bar(float percent) {
+    int filled = (int)(percent / (100.0 / BAR_WIDTH));
+    for (int i = 0; i < BAR_WIDTH; i++) {
+        if (i < filled) printf("#");
+        else printf("-");
+    }
+}
+
+// Lê informações de swap do sistema
+void get_swap_usage_kb(long *total_swap_kb, long *used_swap_kb) { 
+    FILE *meminfo = fopen("/proc/meminfo", "r");  //Lê o meminfo
+    char line[MAX_LINE]; // define o line com o valor maximo setado acima
+    long swap_total = 0, swap_free = 0; //cria variaveis zeradas
+
+    if (!meminfo) return;
+
+    while (fgets(line, sizeof(line), meminfo)) { // Esse while roda o meminfo buscndo dados da swap expostos lá, como SwapTotal e SwapFree, valida seus tamanhos e gera porcentangem
+        if (strncmp(line, "SwapTotal:", 10) == 0) {
+            sscanf(line, "SwapTotal: %ld", &swap_total);
+        } else if (strncmp(line, "SwapFree:", 9) == 0) {
+            sscanf(line, "SwapFree: %ld", &swap_free);
+        }
+    }
+
+    fclose(meminfo);  // fecha o arquivo dps de ler
+    *total_swap_kb = swap_total;
+    *used_swap_kb = swap_total - swap_free;
+}
+
+
+// Lista os processos e printa o consumo de memória de cada um
+void list_processes(long total_mem_kb) {
+    DIR *proc = opendir(PROC_DIR);
+    struct dirent *entry;
+    ProcessInfo processes[MAX_PROC];
+    int count = 0;
+
+    char *ram_speed = get_memory_speed();
+
+    if (!proc) {
+        perror("Erro ao abrir /proc");
+        return;
+    }
+
+    while ((entry = readdir(proc)) != NULL) { //fica lendo se entra algo de novo do /proc (Todo processo em execução tem um deretório com seu nome e seu PID) (ex: /proc/1234).
+        if (is_number(entry->d_name)) { //aqui verifica se a entreada é um número (PID)
+            char status_path[MAX_PATH]; // cria um arquivo com o caminho completo do STATUS usando o valor pre defeinido anteriormente em variável
+            snprintf(status_path, sizeof(status_path), PROC_DIR "/%s/status", entry->d_name); //Esse snprintf vi em um site e diz que ajuda para eveitar o overflow do buffer (Estudar)
+
+            FILE *status_file = fopen(status_path, "r"); //tenta abrir o status_path 
+            if (status_file) {
+                char line[MAX_LINE];
+                ProcessInfo p; // Transforma o nome completo do diretório para somente o PID (Para ficar mais fácil de printar)
+                p.pid = atoi(entry->d_name); 
+                p.name[0] = '\0'; //trasnforma o nome em 0
+                p.memory_kb = 0;
+
+                while (fgets(line, sizeof(line), status_file)) { // lê tudo que tem de arquivo no /proc/<PID>/status
+                    if (strncmp(line, "Name:", 5) == 0) { // em suma se ele achar a linha nome ele pega esse nome e salva para depois
+                        sscanf(line, "Name:\t%255s", p.name);
+                    } else if (strncmp(line, "VmRSS:", 6) == 0) { // Aqui invés de extrair o nome ele pega a qtd de memória me KB
+                        sscanf(line, "VmRSS:\t%ld", &p.memory_kb);
+                        break; // Importante deixar esse break, (Não remover)
+                    }
+                }
+                fclose(status_file); // aqui fecha o arquivo de status após ler tudo que precisava (Por isso a importância do break acima)
+
+                if (p.name[0] != '\0' && p.memory_kb > 0) {  // Aqui é só para validar o se o nome não é nulo ou a memória é negativa (por incrivel que parece tem memória negativa)
+                    processes[count++] = p;
+                    if (count >= MAX_PROC) break; // ele para quando chegar no MAX_PROC que e 4096 (para não consumir muita memória)
+                }
+            }
+        }
+    }
+
+    closedir(proc);
+    qsort(processes, count, sizeof(ProcessInfo), compare_memory); // Ordena o Arrey process usando o método comparare_memory, que ordena em ordem decrecente pelo memory_kb
+
+    long available_kb = get_available_memory_kb(); // atualiza a variavel available_kb com dados mais recentes
+    long used_kb = total_mem_kb - available_kb; // calcula quanto de memória esta sendo usada com base no valor total menos o disponível
+    float total_percent = (float)used_kb / total_mem_kb * 100.0; //gera a porcentagem
+    
+    long swap_total = 0, swap_used =0; //declara valrialvel a ser usada 
+    get_swap_usage_kb(&swap_total, &swap_used); // valores salvos com o Get
+    float swap_percent = swap_total > 0 ? ((float)swap_used / swap_total * 100.0) : 0.0;
+
+    // Cabeçalho (Onde ficam as principais infos)
+    printf("\033[H\033[J"); // Voltei para ká
+    printf("Monitor de Processos - Pressione Ctrl+C para sair\n");
+    printf(" Velocidade da Memória: %s\n\n", ram_speed); //Printa velociade de memoria
+
+    printf("Uso de Swap");
+    draw_bar(swap_percent); //desenha barra e consumo de swap
+    printf("] %5.1f%% (%ld KB usados de %ld KB)\n\n", swap_percent, swap_used, swap_total); // Printa o uso da Swap em porcentagem, consusmo total e total disponivel
+
+    printf("Uso total de memória: [");
+    draw_bar(total_percent); // faz a barra de memória
+    printf("] %5.1f%%\n\n", total_percent); // printa uso de memoria 
+    printf("--------------------------------------------------------------------------\n");
+    printf("Monitor de Processos - Pressione Ctrl+C para sair\n");
+    printf("%-6s %-20s %10s   %s\n", "PID", "Nome", "Mem (KB)", "Uso de Memória");
+    // uma caralhada de print com algumas variaveis pegas acima, além de melhoria de apresentação
+
+
+    for (int i = 0; i < count && i < 20; i++) { // limita aos top 20 (não tem sentido printar tudo do computador)
+        float percent = (float)processes[i].memory_kb / total_mem_kb * 100.0; // daqui para baixo somente printe e "deixa bonito"
+        printf("%-6d %-20s %10ld   [", processes[i].pid, processes[i].name, processes[i].memory_kb);
+        draw_bar(percent);
+        printf("] %5.1f%%\n", percent);
+    }
+}
+
+// Função para fechar o programinha, aqui ele pega se clicarmo Ctrl + C
+void handle_sigint(int sig) {
+    printf("\033[0m\nEncerrando monitor...\n");
+    exit(0);
+}
+
+int main() {
+    signal(SIGINT, handle_sigint); // captura Ctrl+C
+
+    //char *ram_speed = get_memory_speed();
+
+    while (1) { //aqui só valida se o total de consumo de memória é maio que 0
+        long total_mem_kb = get_total_memory_kb();
+        if (total_mem_kb == 0) {
+            fprintf(stderr, "Erro ao obter memória total\n");
+            break;
+        }
+
+  //              printf("\033[H\033[J"); // limpa a tela
+     //   printf("Monitor de Processos - Pressione Ctrl+C para sair\n");  // apagar dps, levei junto aos demais prints
+   //     printf(" Velocidade da Memória: %s\n\n", ram_speed);
+
+        list_processes(total_mem_kb);
+
+        fflush(stdout);
+        sleep(1);
+    }
+
+    return 0;
+}
