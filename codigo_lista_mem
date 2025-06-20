@@ -12,6 +12,8 @@
 #define MAX_PROC 4096
 #define BAR_WIDTH 30
 
+int limit = 20;
+
 // Char onde armazena as informações dos processos
 typedef struct {
     int pid;
@@ -169,7 +171,7 @@ void list_processes(long total_mem_kb) {
     }
 
     closedir(proc);
-    qsort(processes, count, sizeof(ProcessInfo), compare_memory); // Ordena o Arrey process usando o método comparare_memory, que ordena em ordem decrecente pelo memory_kb
+    qsort(processes, count, sizeof(ProcessInfo), compare_memory); // Ordena o Array process usando o método comparare_memory, que ordena em ordem decrecente pelo memory_kb
 
     long available_kb = get_available_memory_kb(); // atualiza a variavel available_kb com dados mais recentes
     long used_kb = total_mem_kb - available_kb; // calcula quanto de memória esta sendo usada com base no valor total menos o disponível
@@ -192,17 +194,19 @@ void list_processes(long total_mem_kb) {
     draw_bar(total_percent); // faz a barra de memória
     printf("] %5.1f%%\n\n", total_percent); // printa uso de memoria 
     printf("--------------------------------------------------------------------------\n");
-    printf("Monitor de Processos - Pressione Ctrl+C para sair\n");
     printf("%-6s %-20s %10s   %s\n", "PID", "Nome", "Mem (KB)", "Uso de Memória");
     // uma caralhada de print com algumas variaveis pegas acima, além de melhoria de apresentação
 
+    
+    if (limit > count) limit = count; //função adionada para printar qtd de números solicitados
 
-    for (int i = 0; i < count && i < 20; i++) { // limita aos top 20 (não tem sentido printar tudo do computador)
-        float percent = (float)processes[i].memory_kb / total_mem_kb * 100.0; // daqui para baixo somente printe e "deixa bonito"
+    for (int i = 0; i < limit; i++) {
+        float percent = (float)processes[i].memory_kb / total_mem_kb * 100.0;
         printf("%-6d %-20s %10ld   [", processes[i].pid, processes[i].name, processes[i].memory_kb);
         draw_bar(percent);
         printf("] %5.1f%%\n", percent);
-    }
+}
+
 }
 
 // Função para fechar o programinha, aqui ele pega se clicarmo Ctrl + C
@@ -213,6 +217,14 @@ void handle_sigint(int sig) {
 
 int main() {
     signal(SIGINT, handle_sigint); // captura Ctrl+C
+
+    printf("Quantos processos deseja exibir por ciclo (máx %d)? ", MAX_PROC); //print + scanner para solicitar qtd
+    scanf("%d", &limit);
+    if (limit <= 0 || limit > MAX_PROC) {
+        printf("Valor inválido. Usando padrão de 20 processos.\n");
+        limit = 20;
+    }
+
 
     //char *ram_speed = get_memory_speed();
 
